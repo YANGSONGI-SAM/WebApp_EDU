@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>달의 위상 변화 관찰하기</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #010103; font-family: 'Pretendard', sans-serif; color: white; }
+        canvas { display: block; }
+        #ui-container {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            pointer-events: none;
+        }
+        .control-panel {
+            background: rgba(15, 23, 42, 0.9);
+            padding: 24px;
+            border-radius: 16px;
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            pointer-events: auto;
+            width: 320px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+        }
+        .btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 12px 20px;
+            border-radius: 10px;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+            font-weight: 600;
+            width: 100%;
+            margin-bottom: 8px;
+        }
+        .btn-primary { background: #3b82f6; color: white; }
+        .btn-primary:hover { background: #2563eb; }
+        .btn-secondary { background: rgba(255, 255, 255, 0.1); color: white; }
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.2); }
+        .btn.active { background: #f59e0b; }
+        
+        .zoom-group {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .btn-zoom {
+            flex: 1;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            font-size: 1.2rem;
+            line-height: 1;
+        }
+        .btn-zoom:hover { background: rgba(255, 255, 255, 0.2); }
+
+        .phase-label {
+            margin-top: 12px;
+            min-height: 4.8rem;
+        }
+        .phase-ko {
+            font-size: 1.7rem;
+            font-weight: 800;
+            color: #fbbf24;
+            display: block;
+            text-shadow: 0 0 15px rgba(251, 191, 36, 0.4);
+            line-height: 1.2;
+        }
+        .phase-en {
+            font-size: 0.95rem;
+            font-weight: 400;
+            color: rgba(255, 255, 255, 0.4);
+            display: block;
+            margin-top: 4px;
+        }
+        .sun-glow {
+            position: absolute;
+            top: 50%;
+            right: -50px;
+            width: 180px;
+            height: 400px;
+            background: radial-gradient(ellipse at center, rgba(251, 191, 36, 0.25) 0%, transparent 70%);
+            transform: translateY(-50%);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="sun-glow"></div>
+
+<div id="ui-container">
+    <div class="control-panel">
+        <h1 class="text-xl font-bold mb-4 flex items-center gap-2">
+            <span>🌙</span> 달의 위상 시뮬레이션
+        </h1>
+        
+        <button id="viewToggle" class="btn btn-primary">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            지구 관찰자 시점
+        </button>
+
+        <div class="zoom-group">
+            <button id="zoomIn" class="btn-zoom" title="확대">＋</button>
+            <button id="zoomOut" class="btn-zoom" title="축소">－</button>
+        </div>
+
+        <button id="playPauseBtn" class="btn btn-secondary">
+            <span id="playPauseIcon">⏸</span>
+            <span id="playPauseText">일시정지</span>
+        </button>
+        
+        <div class="mt-4 mb-4">
+            <div class="flex justify-between text-xs mb-1 text-gray-400">
+                <span>공전 속도</span>
+                <span id="speedVal">0.005</span>
+            </div>
+            <input type="range" id="speedRange" min="0" max="0.03" step="0.001" value="0.005" class="w-full accent-blue-500">
+        </div>
+
+        <div class="border-t border-gray-700 pt-4 mt-2">
+            <div class="text-xs text-gray-400 uppercase tracking-wider">현재 달의 상태</div>
+            <div id="phaseDisplay" class="phase-label">
+                <span class="phase-ko">삭</span>
+                <span class="phase-en">New Moon</span>
+            </div>
+            <div id="dayDisplay" class="text-sm text-blue-300 mt-1">음력 약 1일</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let scene, camera, renderer;
+    let earth, moon, moonPivot, stars, northPoleLabel;
+    let isObserverView = false;
+    let isPlaying = true;
+    
+    // 줌 레벨 변수 (기본 1.0)
+    let zoomLevel = 1.0;
+    
+    let targetCameraPos = new THREE.Vector3(0, 80, 0);
+    let targetLookAt = new THREE.Vector3(0, 0, 0);
+    let targetUp = new THREE.Vector3(0, 0, -1);
+    let targetFov = 15; 
+    
+    let currentCameraPos = new THREE.Vector3(0, 80, 0);
+    let currentLookAt = new THREE.Vector3(0, 0, 0);
+    let currentUp = new THREE.Vector3(0, 0, -1);
+    let currentFov = 15;
+
+    let orbitAngle = 0;
+    let orbitSpeed = 0.005;
+
+    const phaseDisplay = document.getElementById('phaseDisplay');
+    const dayDisplay = document.getElementById('dayDisplay');
+    const viewBtn = document.getElementById('viewToggle');
+    const playPauseBtn = document.getElementById('playPauseBtn');
+    const playPauseIcon = document.getElementById('playPauseIcon');
+    const playPauseText = document.getElementById('playPauseText');
+    const speedInput = document.getElementById('speedRange');
+    const speedValDisplay = document.getElementById('speedVal');
+    const zoomInBtn = document.getElementById('zoomIn');
+    const zoomOutBtn = document.getElementById('zoomOut');
+
+    function createEarthTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1024; canvas.height = 512;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#1a4fb0';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#2d5a27';
+        for(let i = 0; i < 30; i++) {
+            const x = Math.random() * canvas.width;
+            const y = Math.random() * canvas.height;
+            const size = 60 + Math.random() * 220;
+            ctx.beginPath(); ctx.moveTo(x, y);
+            for(let j = 0; j < 8; j++) ctx.lineTo(x + Math.random() * size, y + Math.random() * size);
+            ctx.closePath(); ctx.fill();
+        }
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.ellipse(canvas.width / 2, 0, canvas.width / 3.5, 75, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(canvas.width / 2, canvas.height, canvas.width / 4, 65, 0, 0, Math.PI * 2); ctx.fill();
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    function createMoonTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 512; canvas.height = 256;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#b0b0b0';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const center = canvas.width / 2;
+        for(let i = 0; i < 150; i++) {
+            const x = Math.random() * canvas.width;
+            const y = Math.random() * canvas.height;
+            const radius = 1 + Math.random() * 10;
+            const distFromCenter = Math.abs(x - center);
+            ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = distFromCenter < 120 ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.1)'; ctx.fill();
+        }
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    function createNorthPoleLabel() {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 256; canvas.height = 128;
+        ctx.fillStyle = 'white';
+        ctx.font = 'Bold 52px Pretendard';
+        ctx.textAlign = 'center';
+        ctx.shadowColor = 'black'; ctx.shadowBlur = 8;
+        ctx.fillText('북극', 128, 80);
+        const texture = new THREE.CanvasTexture(canvas);
+        const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+        const sprite = new THREE.Sprite(spriteMat);
+        sprite.scale.set(4, 2, 1);
+        sprite.position.set(0, 2.5, 0); 
+        return sprite;
+    }
+
+    function init() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(15, window.innerWidth / window.innerHeight, 0.1, 2000);
+        camera.position.set(0, 80, 0);
+        camera.up.set(0, 0, -1);
+        camera.lookAt(0, 0, 0);
+
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        const sunLight = new THREE.DirectionalLight(0xffffff, 1.8);
+        sunLight.position.set(100, 0, 0);
+        sunLight.target.position.set(0, 0, 0);
+        scene.add(sunLight);
+        scene.add(sunLight.target);
+
+        const ambientLight = new THREE.AmbientLight(0x181818);
+        scene.add(ambientLight);
+
+        const earthGeometry = new THREE.SphereGeometry(2.2, 64, 64);
+        const earthMaterial = new THREE.MeshLambertMaterial({ map: createEarthTexture() });
+        earth = new THREE.Mesh(earthGeometry, earthMaterial);
+        scene.add(earth);
+
+        northPoleLabel = createNorthPoleLabel();
+        scene.add(northPoleLabel);
+
+        const moonGeometry = new THREE.SphereGeometry(0.75, 48, 48);
+        const moonMaterial = new THREE.MeshLambertMaterial({ map: createMoonTexture() });
+        moon = new THREE.Mesh(moonGeometry, moonMaterial);
+        moonPivot = new THREE.Object3D();
+        scene.add(moonPivot);
+        moonPivot.add(moon);
+        moon.position.set(12, 0, 0); 
+        moon.rotation.y = Math.PI / 2; 
+
+        const orbitCurve = new THREE.EllipseCurve(0, 0, 12, 12);
+        const points = orbitCurve.getPoints(128);
+        const orbitGeo = new THREE.BufferGeometry().setFromPoints(points);
+        const orbitMat = new THREE.LineBasicMaterial({ color: 0x334455, transparent: true, opacity: 0.5 });
+        const orbitLine = new THREE.LineLoop(orbitGeo, orbitMat);
+        orbitLine.rotation.x = Math.PI / 2;
+        scene.add(orbitLine);
+
+        const starGeo = new THREE.BufferGeometry();
+        const starPos = new Float32Array(4000 * 3);
+        for(let i=0; i<4000*3; i++) starPos[i] = (Math.random() - 0.5) * 1200;
+        starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+        const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.8 });
+        stars = new THREE.Points(starGeo, starMat);
+        scene.add(stars);
+
+        window.addEventListener('resize', onWindowResize);
+        viewBtn.addEventListener('click', toggleView);
+        playPauseBtn.addEventListener('click', togglePlayPause);
+        speedInput.addEventListener('input', (e) => {
+            orbitSpeed = parseFloat(e.target.value);
+            speedValDisplay.textContent = orbitSpeed.toFixed(3);
+        });
+
+        // 줌 버튼 이벤트
+        zoomInBtn.addEventListener('click', () => { zoomLevel = Math.max(0.3, zoomLevel - 0.1); });
+        zoomOutBtn.addEventListener('click', () => { zoomLevel = Math.min(2.5, zoomLevel + 0.1); });
+
+        animate();
+    }
+
+    function toggleView() {
+        isObserverView = !isObserverView;
+        if (isObserverView) {
+            isPlaying = false;
+            targetUp.set(0, 1, 0);
+            viewBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg> 공전 궤도 시점`;
+            viewBtn.classList.add('active');
+        } else {
+            targetUp.set(0, 0, -1);
+            viewBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> 지구 관찰자 시점`;
+            viewBtn.classList.remove('active');
+        }
+        if(!isPlaying) updatePlayPauseUI();
+    }
+
+    function togglePlayPause() {
+        isPlaying = !isPlaying;
+        updatePlayPauseUI();
+    }
+
+    function updatePlayPauseUI() {
+        playPauseIcon.textContent = isPlaying ? '⏸' : '▶';
+        playPauseText.textContent = isPlaying ? '일시정지' : '다시 재생';
+        isPlaying ? playPauseBtn.classList.remove('active') : playPauseBtn.classList.add('active');
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        if (isPlaying) {
+            orbitAngle += orbitSpeed;
+            moonPivot.rotation.y = orbitAngle;
+            earth.rotation.y += 0.0015;
+            moon.rotation.y = Math.PI / 2; 
+        }
+
+        if (isObserverView) {
+            const moonWorldPos = new THREE.Vector3();
+            moon.getWorldPosition(moonWorldPos);
+            targetCameraPos.set(0, 0.45, 0);
+            targetLookAt.copy(moonWorldPos);
+            // 관찰자 시점 줌은 FOV로 조절
+            targetFov = 65 * zoomLevel; 
+            northPoleLabel.visible = false;
+        } else {
+            // 항공샷 줌은 카메라 높이로 조절
+            targetCameraPos.set(0, 80 * zoomLevel, 0);
+            targetLookAt.set(0, 0, 0);
+            targetFov = 15;
+            northPoleLabel.visible = true;
+        }
+
+        currentCameraPos.lerp(targetCameraPos, 0.06);
+        currentLookAt.lerp(targetLookAt, 0.06);
+        currentUp.lerp(targetUp, 0.06);
+        currentFov = THREE.MathUtils.lerp(currentFov, targetFov, 0.06);
+        
+        camera.position.copy(currentCameraPos);
+        camera.up.copy(currentUp);
+        camera.fov = currentFov;
+        camera.updateProjectionMatrix();
+        camera.lookAt(currentLookAt);
+
+        let nAngle = (orbitAngle % (Math.PI * 2)); if (nAngle < 0) nAngle += Math.PI * 2;
+        const deg = (nAngle / (Math.PI * 2)) * 360;
+        let ko = "", en = "", d = 1;
+        if (deg >= 345 || deg < 15) { ko = "삭"; en = "New Moon"; d = 1; }
+        else if (deg >= 15 && deg < 75) { ko = "초승달"; en = "Waxing Crescent"; d = 4; }
+        else if (deg >= 75 && deg < 105) { ko = "상현달"; en = "First Quarter"; d = 7.5; }
+        else if (deg >= 105 && deg < 165) { ko = "상현에서 보름으로"; en = "Waxing Gibbous"; d = 11; }
+        else if (deg >= 165 && deg < 195) { ko = "망 / 보름달"; en = "Full Moon"; d = 15; }
+        else if (deg >= 195 && deg < 255) { ko = "보름에서 하현으로"; en = "Waning Gibbous"; d = 19; }
+        else if (deg >= 255 && deg < 285) { ko = "하현달"; en = "Last Quarter"; d = 22.5; }
+        else if (deg >= 285 && deg < 345) { ko = "그믐달"; en = "Waning Crescent"; d = 26; }
+        phaseDisplay.innerHTML = `<span class="phase-ko">${ko}</span><span class="phase-en">${en}</span>`;
+        dayDisplay.textContent = `음력 약 ${d.toFixed(1)}일`;
+
+        renderer.render(scene, camera);
+    }
+
+    window.onload = init;
+</script>
+</body>
+</html>
