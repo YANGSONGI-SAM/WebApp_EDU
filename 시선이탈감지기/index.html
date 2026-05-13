@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>학생 집중도 모니터링 시스템</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #111827;
+            color: #f3f4f6;
+            margin: 0;
+            overflow: hidden;
+        }
+        #video-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+        /* 비디오 요소를 화면에 꽉 차게 비율 유지 */
+        video {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* 거울 모드 (좌우 반전) */
+        }
+        /* 캔버스를 비디오 위에 완벽히 겹치도록 설정 */
+        canvas {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* 캔버스도 좌우 반전하여 비디오와 맞춤 */
+            pointer-events: none; /* 클릭 이벤트 통과 */
+        }
+        #loading-ui {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(17, 24, 39, 0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 50;
+        }
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border-left-color: #3b82f6;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 로딩 화면 -->
+    <div id="loading-ui">
+        <div class="spinner mb-4"></div>
+        <h2 id="loading-text" class="text-xl font-semibold text-white">AI 모델 불러오는 중...</h2>
+        <p class="text-gray-400 mt-2 text-sm text-center max-w-md">
+            클라이언트 브라우저로 딥러닝 모델을 다운로드하고 있습니다.<br>
+            초기 로딩에 5~10초 정도 소요될 수 있습니다.
+        </p>
+    </div>
+
+    <!-- 비디오 및 캔버스 컨테이너 -->
+    <div id="video-container">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="canvas"></canvas>
+        
+        <!-- 상단 상태 표시줄 -->
+        <div class="absolute top-4 left-4 right-4 flex justify-between items-start z-10 pointer-events-none">
+            <div class="bg-gray-900/60 backdrop-blur-sm p-4 rounded-xl border border-gray-700 shadow-lg">
+                <h1 class="text-lg font-bold text-white flex items-center gap-2">
+                    <span class="w-3 h-3 rounded-full bg-green-500 animate-pulse"></span>
+                    실시간 시선 및 눈 감음 감지
+                </h1>
+                <p class="text-sm text-gray-300 mt-1">서버 연결 없이 브라우저에서 실시간 처리 중</p>
+                <div class="mt-2 text-xs font-mono text-gray-400">
+                    <div>탐지된 얼굴: <span id="face-count" class="text-white font-bold">0</span>명</div>
+                    <div>주의 필요: <span id="alert-count" class="text-red-400 font-bold">0</span>명</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- face-api.js 라이브러리 로드 (Vlad Mandic 포크 버전: 브라우저 환경에 최적화됨) -->
+    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.min.js"></script>
+
+    <script>
+        // DOM 요소 캐싱
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const loadingUi = document.getElementById('loading-ui');
+        const loadingText = document.getElementById('loading-text');
+        const faceCountEl = document.getElementById('face-count');
+        const alertCountEl = document.getElementById('alert-count');
+
+        // 알고리즘 임계값 설정
+        const EAR_THRESHOLD = 0.23; // 눈 종횡비 (이하이면 눈을 감은 것으로 간주)
+        const YAW_THRESHOLD_HIGH = 1.7; // 고개 돌림 비율 (우측)
+        const YAW_THRESHOLD_LOW = 0.6;  // 고개 돌림 비율 (좌측)
+
+        async function loadModels() {
+            // 원격 CDN에서 face-api.js 모델 가중치 파일 다운로드
+            const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/';
+            
+            try {
+                loadingText.innerText = "얼굴 인식 모델 로딩 중... (1/2)";
+                // SsdMobilenetv1: TinyFace보다 무겁지만 작은 얼굴, 멀리 있는 얼굴 탐지에 탁월함
+                await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+                
+                loadingText.innerText = "얼굴 랜드마크 모델 로딩 중... (2/2)";
+                // FaceLandmark68Net: 68개의 눈, 코, 입, 턱선 위치 파악용
+                await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+                
+                loadingText.innerText = "웹캠 권한 요청 중...";
+                startVideo();
+            } catch (err) {
+                console.error("모델 로딩 실패:", err);
+                loadingText.innerText = "모델 로딩 실패. 네트워크 연결을 확인하세요.";
+                loadingText.classList.add("text-red-500");
+            }
+        }
+
+        function startVideo() {
+            navigator.mediaDevices.getUserMedia({ 
+                video: { 
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
+                    facingMode: "user" 
+                } 
+            })
+            .then(stream => {
+                video.srcObject = stream;
+            })
+            .catch(err => {
+                console.error("웹캠 접근 에러:", err);
+                loadingText.innerText = "웹캠을 찾을 수 없거나 권한이 거부되었습니다.";
+                loadingText.classList.add("text-red-500");
+            });
+        }
+
+        // 두 점 사이의 유클리드 거리 계산
+        function getDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        // 눈 종횡비 (Eye Aspect Ratio, EAR) 계산 함수
+        function calculateEAR(eyePoints) {
+            // eyePoints는 6개의 랜드마크 점으로 구성됨
+            // 세로 거리 (눈꺼풀 위아래)
+            const vertical1 = getDistance(eyePoints[1], eyePoints[5]);
+            const vertical2 = getDistance(eyePoints[2], eyePoints[4]);
+            // 가로 거리 (눈꼬리와 눈앞머리)
+            const horizontal = getDistance(eyePoints[0], eyePoints[3]);
+            
+            // EAR 공식
+            const ear = (vertical1 + vertical2) / (2.0 * horizontal);
+            return ear;
+        }
+
+        // 눈 감음 여부 판별
+        function isEyesClosed(landmarks) {
+            // face-api.js 68점 모델 기준 왼쪽/오른쪽 눈 인덱스
+            const leftEyePoints = landmarks.slice(36, 42);
+            const rightEyePoints = landmarks.slice(42, 48);
+
+            const leftEAR = calculateEAR(leftEyePoints);
+            const rightEAR = calculateEAR(rightEyePoints);
+
+            const avgEAR = (leftEAR + rightEAR) / 2.0;
+            return avgEAR < EAR_THRESHOLD;
+        }
+
+        // 고개 돌림(시선 이탈) 여부 판별
+        function isLookingAway(landmarks) {
+            // 30번은 코의 중심(콧대 아래쪽), 0번은 왼쪽 턱선 끝, 16번은 오른쪽 턱선 끝
+            const nose = landmarks[30]; 
+            const leftJaw = landmarks[0];
+            const rightJaw = landmarks[16];
+
+            const distLeft = getDistance(nose, leftJaw);
+            const distRight = getDistance(nose, rightJaw);
+
+            // 코와 양쪽 턱선의 거리 비율 계산
+            // 정면을 보면 비율이 1에 가까움. 고개를 돌리면 비율이 크게 달라짐.
+            const ratio = distLeft / distRight;
+
+            return ratio > YAW_THRESHOLD_HIGH || ratio < YAW_THRESHOLD_LOW;
+        }
+
+        function drawAlertBox(ctx, box, message) {
+            const { x, y, width, height } = box;
+            
+            // 빨간색 박스
+            ctx.strokeStyle = "rgba(239, 68, 68, 0.8)"; // Tailwind red-500
+            ctx.lineWidth = 4;
+            ctx.strokeRect(x, y, width, height);
+            
+            // 경고 텍스트 배경
+            ctx.fillStyle = "rgba(239, 68, 68, 0.9)";
+            const textWidth = ctx.measureText(message).width;
+            ctx.fillRect(x, y - 30, textWidth + 16, 28);
+            
+            // 경고 텍스트
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 16px Inter, sans-serif";
+            ctx.fillText(message, x + 8, y - 10);
+        }
+
+        video.addEventListener('loadedmetadata', () => {
+            // 비디오 메타데이터가 로드되면 캔버스 크기를 비디오 크기에 맞춤
+            canvas.width = video.clientWidth;
+            canvas.height = video.clientHeight;
+        });
+
+        video.addEventListener('play', () => {
+            loadingUi.style.display = 'none'; // 로딩 UI 숨김
+            
+            const displaySize = { width: video.clientWidth, height: video.clientHeight };
+            faceapi.matchDimensions(canvas, displaySize);
+            
+            // 2D 컨텍스트 최적화
+            const ctx = canvas.getContext('2d', { alpha: true });
+
+            // 추론 루프 (매 프레임마다 실행)
+            async function detectLoop() {
+                if (video.paused || video.ended) return;
+
+                // 멀리 있는 얼굴(작은 얼굴)을 잡기 위해 minConfidence를 낮춤 (기본 0.5 -> 0.3)
+                const options = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3 });
+                
+                // 얼굴 및 랜드마크(눈, 코 위치 등) 추론
+                const detections = await faceapi.detectAllFaces(video, options).withFaceLandmarks();
+                
+                // 비디오 캔버스 크기에 맞게 좌표 리사이징
+                const resizedDetections = faceapi.resizeResults(detections, displaySize);
+
+                // 이전 프레임 지우기
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                let inattentiveCount = 0;
+
+                resizedDetections.forEach(det => {
+                    const landmarks = det.landmarks.positions;
+                    const box = det.detection.box;
+
+                    const eyesClosed = isEyesClosed(landmarks);
+                    const lookingAway = isLookingAway(landmarks);
+
+                    if (eyesClosed || lookingAway) {
+                        inattentiveCount++;
+                        let msg = "집중 요망";
+                        if (eyesClosed && lookingAway) msg = "수면 / 이탈";
+                        else if (eyesClosed) msg = "눈 감음 감지";
+                        else if (lookingAway) msg = "시선 이탈";
+
+                        drawAlertBox(ctx, box, msg);
+                    } else {
+                        // 정상 응시 중일 때 얇은 초록색 테두리 (디버깅/확인용, 원하지 않으면 주석 처리 가능)
+                        ctx.strokeStyle = "rgba(34, 197, 94, 0.4)"; // Tailwind green-500
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(box.x, box.y, box.width, box.height);
+                    }
+                });
+
+                // UI 업데이트
+                faceCountEl.innerText = detections.length;
+                alertCountEl.innerText = inattentiveCount;
+
+                // 다음 프레임 요청 (requestAnimationFrame으로 부드러운 루프 구현)
+                requestAnimationFrame(detectLoop);
+            }
+
+            // 브라우저 렌더링 주기에 맞춰 루프 시작
+            detectLoop();
+        });
+
+        // 윈도우 리사이즈 대응
+        window.addEventListener('resize', () => {
+            if(!video.paused) {
+                canvas.width = video.clientWidth;
+                canvas.height = video.clientHeight;
+                faceapi.matchDimensions(canvas, { width: video.clientWidth, height: video.clientHeight });
+            }
+        });
+
+        // 앱 초기화 시작
+        window.onload = loadModels;
+
+    </script>
+</body>
+</html>
